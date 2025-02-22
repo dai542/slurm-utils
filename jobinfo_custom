@@ -2,7 +2,7 @@
 #
 # jobinfo - collect job information from slurm in nicely readable format
 #
-# Copyright 2024 DJ <admin@djhpc.top>
+# Copyright 2024 admin@djhpc.top
 #
 # LICENSE: MIT
 
@@ -82,11 +82,60 @@ def time_max(a, b):
         return a
     return max(a, b)
 
+def get_memory_stats(jobid):
+    """Get total memory usage and efficiency for the job"""
+    try:
+        info = subprocess.Popen(['seff', jobid], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        output = info.stdout.read().decode("utf-8")
+        
+        mem_total = None
+        mem_used = None
+        mem_efficiency = None
+        
+        for line in output.split('\n'):
+            if "Memory Utilized:" in line:
+                mem_str = line.split(':')[1].strip().split('(')[0].strip()
+                value = float(mem_str.split()[0])
+                unit = mem_str.split()[1]
+                
+                unit_multiplier = {
+                    'KB': 1024,
+                    'MB': 1024**2,
+                    'GB': 1024**3,
+                    'TB': 1024**4
+                }
+                mem_used = value * unit_multiplier.get(unit.upper(), 1)
+            elif "Memory Efficiency:" in line:
+                mem_efficiency = float(line.split(':')[1].split('%')[0].strip())
+                
+        return mem_used, mem_efficiency
+    except:
+        return None, None
+
 # Formatters:
 def f_rss(x, meta):
     if x < 0:
         return "--"
-    return "%s (%s)" % (format_bs(x), ",".join(meta.MaxRSSNode))
+    
+    # Get total memory usage and efficiency
+    total_mem, mem_efficiency = get_memory_stats(meta.JobID)
+    
+    if total_mem is not None:
+        if mem_efficiency is not None:
+            return "Per process: %s, Total: %s (%.2f%% of reserved, on %s)" % (
+                format_bs(x),
+                format_bs(total_mem),
+                mem_efficiency,
+                ",".join(meta.MaxRSSNode)
+            )
+        else:
+            return "Per process: %s, Total: %s (on %s)" % (
+                format_bs(x),
+                format_bs(total_mem),
+                ",".join(meta.MaxRSSNode)
+            )
+    else:
+        return "Per process: %s (on %s)" % (format_bs(x), ",".join(meta.MaxRSSNode))
 
 def f_dw(x, meta):
     if x < 0:
@@ -103,7 +152,20 @@ def f_cpu(x, meta):
     if total == 0:
         return "--"
     xp = elapsed_to_seconds(x)
-    return "%5.2f%%" % (xp/total*100)
+    percentage = xp/total*100
+    
+    if x == meta.UserCPU:
+        try:
+            info = subprocess.Popen(['seff', meta.JobID], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            output = info.stdout.read().decode("utf-8")
+            for line in output.split('\n'):
+                if "CPU Efficiency:" in line:
+                    cpu_efficiency = float(line.split(':')[1].split('%')[0].strip())
+                    return "%5.2f%% (%.2f%% efficiency)" % (percentage, cpu_efficiency)
+        except:
+            pass
+    
+    return "%5.2f%%" % percentage
 
 def f_mem(x, meta):
     if x.endswith('c'):
@@ -316,7 +378,34 @@ and historical jobs.
 Usage:
     jobinfo [-v] <job id>
 
+Options:
+    -v, --verbose    Show additional job information
+    -h, --help       Show this help message
+
+Output Metrics Explanation:
+--------------------------
+CPU Usage:
+    1. Time Distribution (User vs System):
+       - User (Computation) %: Time spent on actual computation tasks
+       - System (I/O) %     : Time spent on I/O operations and system calls
+       * These percentages show how the program spends its CPU time
+       * Example: 91.15% User means 91.15% of CPU time was spent on computation
+
+    2. CPU Efficiency:
+       - Shows how well the program utilizes allocated CPU cores
+       - 100% means all cores were fully utilized
+       - Calculation: (Used CPU time) / (Number of cores × Wall time)
+       * Example: 99.46% efficiency means almost all cores were actively used
+
+Memory Usage:
+    1. Per process    : Maximum memory used by a single process
+    2. Total          : Total memory used by all processes
+    3. % of reserved  : Percentage of requested memory that was actually used
+    * Example: "Per process: 2.99G, Total: 179.13G (50.95% of reserved)"
+               means each process used up to 2.99G, with total usage of 179.13G,
+               using 50.95% of the reserved memory
 """, file=pipe)
+
 
 if __name__ == "__main__":
     verbose = False
